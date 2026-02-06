@@ -1,0 +1,2 @@
+"""Docling Celery worker package."""
+

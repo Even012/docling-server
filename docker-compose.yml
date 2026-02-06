@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  docling-worker:
+    build:
+      context: .
+      dockerfile: docling_worker/Dockerfile
+    container_name: docling-worker
+    restart: unless-stopped
+    environment:
+      # Uses the same local Redis as design_assistant_backend.
+      # host.docker.internal resolves to the host machine from inside the container.
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://host.docker.internal:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://host.docker.internal:6379/0}
+      - DOCLING_INPUT_DIR=/app/documents
+      - DOCLING_OUTPUT_DIR=/app/output
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    command: ["celery", "-A", "docling_worker.celery_app", "worker", "--loglevel=INFO", "-Q", "docling"]
+    volumes:
+      - ./documents:/app/documents:ro
+      - ./output:/app/output
+      - ./docling_worker:/app/docling_worker
