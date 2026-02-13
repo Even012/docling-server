@@ -1,13 +1,18 @@
 import base64
+import logging
 import mimetypes
 import os
 import re
 import shlex
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 from docling_worker.celery_app import celery_app
+
+logger = logging.getLogger(__name__)
 
 # Matches markdown image syntax: ![alt text](url)
 _IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
@@ -77,19 +82,50 @@ def convert(self, *, input: str, output_subdir: str | None = None, extra_args: l
 
     is_url = input.startswith("http://") or input.startswith("https://")
     input_arg: str
+
+    # Log the file source being processed
     if is_url:
+        # Extract readable OSS key from presigned URL path
+        parsed = urlparse(input)
+        oss_path = unquote(parsed.path).lstrip("/")
+        logger.info(
+            "[docling.convert] task=%s source=URL oss_path=%s",
+            self.request.id,
+            oss_path,
+        )
         input_arg = input
     else:
         in_path = _require_under_dir((input_dir / input).resolve(), input_dir)
         if not in_path.exists():
             raise FileNotFoundError(f"Input file not found: {in_path}")
+        logger.info(
+            "[docling.convert] task=%s source=FILE path=%s",
+            self.request.id,
+            in_path,
+        )
         input_arg = str(in_path)
 
     cmd: list[str] = ["docling", input_arg, "--output", str(out_dir), "--ocr-engine", "rapidocr"]
     if extra_args:
         cmd.extend(extra_args)
 
+    logger.info("[docling.convert] task=%s running: %s", self.request.id, " ".join(shlex.quote(c) for c in cmd))
+    t0 = time.monotonic()
     proc = subprocess.run(cmd, capture_output=True, text=True)
+    elapsed = time.monotonic() - t0
+
+    logger.info(
+        "[docling.convert] task=%s finished in %.1fs returncode=%d",
+        self.request.id,
+        elapsed,
+        proc.returncode,
+    )
+    if proc.returncode != 0:
+        logger.error(
+            "[docling.convert] task=%s stderr: %s",
+            self.request.id,
+            proc.stderr[-2000:] if proc.stderr else "(empty)",
+        )
 
     # Read converted markdown from output directory
     markdown_content = None
@@ -106,7 +142,16 @@ def convert(self, *, input: str, output_subdir: str | None = None, extra_args: l
 
     # Embed extracted images as base64 data URIs
     if markdown_content:
+        image_count = len(_IMAGE_RE.findall(markdown_content))
         markdown_content = _embed_images(markdown_content, out_dir)
+        logger.info(
+            "[docling.convert] task=%s markdown=%d chars, %d images embedded",
+            self.request.id,
+            len(markdown_content),
+            image_count,
+        )
+    else:
+        logger.warning("[docling.convert] task=%s no markdown output produced", self.request.id)
 
     return {
         "cmd": " ".join(shlex.quote(c) for c in cmd),
